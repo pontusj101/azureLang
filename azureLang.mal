@@ -1,0 +1,842 @@
+
+category System {
+
+	abstractAsset Machine {
+			
+		| connect
+			info: "Attempt to connect on the machine."
+			->	authenticatedAccess
+		    
+		| authenticate
+			info: "Does the attacker have the credentials of an account?"
+			->	authenticatedAccess
+
+		& authenticatedAccess
+			info: "One way to gain access to a machine is through legitimate authentication."
+			->	access
+ 
+		| access
+			rationale: "We don't explicitly model root access; that is not a sound primitive. Instead, such an account can be modelled explicitly by providing an account with access to all executees and all data."
+			->	_machineAccess
+
+		| _machineAccess
+			rationale: "This is a helper attack step that will also be used from the childs of this asset."
+			->	data.requestAccess,
+				executees.connect,
+				vulnerability.exploit
+
+		| denialOfService
+			info: "Perform a DoS attack on the machine."
+			->	executees.denialOfService,
+				data.denyAccess
+	
+	}
+	
+	// Azure specific asset
+	asset VirtualMachine extends Machine {
+		
+		| readerAccess
+		->	_connectVM
+		
+		| contributorAccess
+		->	readerAccess,
+			startMachine,
+			stopMachine,
+			deleteMachine,
+			dataDisks.detach
+			
+		& _connectVM
+		info: "Minimum required privilegs to connect remotely to a VM"
+		rationale: "privileges needed are:
+		1. VM user login role over the VM
+		2. Reader role over the VM
+		3. Reader role over the NIC associated to the VM
+		4. Reader role over the Public IP associated to the NIC"
+		->	connect
+		
+		& authenticatedAccess
+		->	_machineAccess,
+			_vmAccess
+			
+		| _vmAccess
+		->	stopMachine,
+			osDisk.access,
+			dataDisks.access,
+			publicAccess
+			
+		& publicAccess
+		info: "In order to access a VM from the internet, it is required to have a public IP associated to the machine."
+		
+		| vmPublicallyInaccessible
+		info: "A user with contributor role over the public IP can make the associated VM publically inaccessible."
+		rationale: "This attack step can be reached by:
+		1. either dissociate the public IP from the VM
+		2. or delete the public IP"
+		
+		| startMachine
+		info: "In Azure, starting machines results in accumulates cost."
+		
+		| stopMachine
+		info: "Stopping machines leads to denialOfService of the machine as well as all the services the machine is running."
+		->	denialOfService
+		
+		| deleteMachine
+		info: "deleting the VM leads to denialOfService of the machine as well as all the services the machine is running."
+		rationale: "When deleting a VM, all associated resources remains undeleted including:
+		1. OS disks
+		2. Data disks
+		3. NIC
+		4. Public IP"
+		->	denialOfService
+	}
+	
+	// Azure specific asset
+	asset WindowsVirtualMachine extends VirtualMachine {
+	
+		& publicAccess
+		->	rdpAccess
+		
+		// here, specify rdp possible threats
+		& rdpAccess
+		info: "connect to the virtual machine through Windows remote desktop service."
+		->	vulnerability.exploit
+		
+		# disableRDP
+		info: "disable remote desktop connection."
+		->	rdpAccess
+	}
+	
+	asset Product {
+	
+	| connect
+		->	connectionVulnerabilities.exploit
+	
+	| access
+		->	accessVulnerabilities.exploit
+	}
+
+	asset Software extends Machine {
+	| access
+		->	_softwareAccess
+
+	|	_softwareAccess
+		->	executor.connect
+	}
+
+	asset Service extends Software {
+	
+		// intentionally left blank
+		
+	}
+
+	asset Client extends Software {
+	
+		// intentionally left blank
+		
+	}
+
+	asset AuthenticationService extends Service 
+		rationale: "Authentication service is not actively involved in account authentication (e.g. key.read leads directly to account.authenticate), because that is not needed for the attacks we are interested in."
+		{
+		| access
+				info: "If a service is tasked with authentication of accounts, its compromise leads to the compromise of the associated accounts."
+				-> _softwareAccess,
+					authenticatedAccounts.compromise
+	}
+
+	asset NetworkClient extends Client {
+		| access
+			->	_softwareAccess,
+				dataflows.request
+	}
+
+	asset NetworkService extends Service {
+		| access
+			->	_softwareAccess,
+				dataflows.respond
+	}
+	
+	// Azure specific asset
+	asset StorageAccount extends Service
+	info: "An azure storage account is a network service that provide Azure Storage Services such as Tables, Queues, Files, Blobs and Azure virtual machine disks under a single account. Access to Azure Storage services can be achieved via Role-based Access Control and/or Shared Access Signature."
+	{
+		|readerAccess
+		info: "Read privilege over all storage services"
+		->	blobsReadAccess,
+			filesReadAccess
+			
+		|blobsReadAccess
+		info: "Read privilege over Blobs"
+		->	blobsContainers.readerAccess
+		
+		|filesReadAccess
+		info: "Read privilege over Files"
+		->	fileShares.readerAccess
+		
+		|contributorAccess
+		info: "Contributor privilege over all storage services"
+		->	blobsContributorAccess,
+			filesContributorAccess,
+			denialOfService
+		
+		|blobsContributorAccess
+		info: "Contributor privilege over Blobs"
+		->	blobsContainers.contributorAccess
+		
+		|filesContributorAccess
+		info: "Contributor privilege over Files"
+		->	fileShares.contributorAccess
+		
+		|denialOfService
+		info: "Denial-of-service over all storage services"
+		-> 	blobsContainers.denyAccess,
+			fileShares.denyAccess,
+			disks.denyAccess
+	}
+
+}
+
+category Networking {
+	asset Network
+		info: "Azure Virtual Network enables many types of Azure resources, such as Azure Virtual Machines (VM), to securely communicate with each other, the internet, and on-premises networks."
+	    { 	
+		| contributorAccess
+				info: "Role-based access with contributor privilege over the virtual network. RBA lets you manage virtual networks (add new, delete existing, or modify network settings)"
+				-> 	denialOfService,
+					publicIP.dissociate
+		
+		| access
+				info: "connected resources, such as Azure Virtual Machines (VM) have access to the virtual network"
+				->	machines.connect
+	
+		| denialOfService
+				info: "The network is made unavailable."
+				-> 	dataflows.denialOfService 
+	}
+    
+	asset Router extends NetworkService {
+
+		& access 
+				-> forwarding
+
+		| forwarding 
+				rationale: "Forwarding is the lightest interaction with the router, where the router simply retransmits received messages. Vulnerabilities may, however, lead to compromise of the router as well as of the associated firewall. Therefore, Forwarding leads to Connect."
+				-> 	connect
+
+		| denialOfService 
+				-> 	trafficNetworks.denialOfService	
+	}
+	
+	// Azure specific asset
+	asset PublicIP
+		info: ""
+	{
+		| readerAccess
+		info: "The step _connectVM is here because in this version of AzureLang, connecting to machines is only possible via Public IP. Otherwise, this step should not be here as it is not a requirement to connect to a VM."
+			->	virtualMachine._connectVM,
+				virtualMachine.publicAccess
+			
+		| contributorAccess
+		->	readerAccess,
+			delete,
+			dissociate
+		
+		| delete
+		info: "delete public IP."
+		->	virtualMachine.vmPublicallyInaccessible
+		
+		& dissociate
+		info: "dissociate public IP from the VM."
+		->	virtualMachine.vmPublicallyInaccessible
+	}
+	
+	// Azure specific asset
+	asset VirtualNIC
+	info: ""
+	{
+		| readerAccess
+			-> virtualMachine._connectVM
+		
+		| contributorAccess
+		->	readerAccess,
+			delete,
+			publicIP.dissociate
+		
+		| delete
+		info: ""
+		->	publicIP.dissociate
+	}
+}
+
+category Communication {
+
+
+	asset Information
+		info: "Information can be stored as data and transmitted in data flows. Data and data flows are syntactic forms of the semantics represented by the Information asset. Thus, multiple data and data flow assets can contain the same information."
+	{
+	| read
+		info: "When information is read by the attacker, any associated confidentiality costs are incurred. It is sufficient that the attacker reads a single data or data flow to breach confidentiality."
+
+	& write
+		info: "When information is written by the attacker, any associated integrity costs are incurred. The attacker must, however, compromise all data and data flows in order to breach integrity. Thus, if the records of an ATM are modified, this might incur no cost as long as the master data is untouched."
+
+	& delete
+		info: "When information is deleted by the attacker, any associated availability costs are incurred. The attacker must, however, delete all data and data flows in order to breach integrity. Thus, if malware wipes a hard drive, this might incur no cost as long as a backup is easily accessible."
+	}
+
+
+	asset Data
+		info: "Data is a concrete, syntactic representation of Information at rest."
+	{
+	| requestAccess  
+		info: "When stored on a machine, access control needs to be granted."
+		-> authenticatedRead,
+			authenticatedWrite,
+			authenticatedDelete
+
+	| anyAccountRead 
+		info: "A single account with read privileges (in conjuction with data access) is enough to read the data."
+		-> authenticatedRead
+
+	| anyAccountWrite
+		info: "A single account with write privileges (in conjuction with data access) is enough to write the data."
+		-> authenticatedWrite
+
+	| anyAccountDelete
+		info: "A single account with delete privileges (in conjuction with data access) is enough to delete the data."
+		-> authenticatedDelete
+
+	& authenticatedRead
+		info: "Access and authentication will allow reading of data."
+		-> read
+
+	& authenticatedWrite
+		info: "Access and authentication will allow writing of data."
+		-> write
+
+	& authenticatedDelete
+		info: "Access and authentication will allow deleting of data."
+		-> delete
+
+	| read
+		info: "An attacker that reads the data, learns the encoded information."
+		-> information.read,
+			containedData.read
+
+	| write
+		-> delete,
+			information.write,
+			containedData.write
+
+	| delete
+		info: "Deletion of data leads to information loss only if there is no untouched copy elsewhere. If data is transmitted through data flows, those data flows will also
+ be affected by the tampering."
+		-> information.delete,
+			containedData.delete
+
+	| denyAccess
+		info: "Denial-of-service attacks can make data unavailable."
+	}
+
+   asset EncryptedData extends Data
+      info: "Data is a concrete, syntactic representation of Information at rest."
+   {
+
+   & authenticatedRead
+      info: "Access and authentication will allow reading of data."
+      -> readEncrypted
+
+   & authenticatedWrite
+      info: "Access and authentication will allow writing of data."
+      -> writeEncrypted
+
+	& readEncrypted
+		->	read
+
+	& writeEncrypted
+		-> write
+	}
+	
+	// Azure specific asset
+	asset BlockBlob extends EncryptedData
+	info: "Azure Storage offers three types of blobs -- block blobs, append blobs which made up of blocks as well, and page blobs (used for VHD files). This asset represents block blobs including append blobs, but not page blobs, i.e., disks."
+	{
+		|contributorAccess
+		->	read,
+			write,
+			delete
+			
+		|readerAccess
+		->	read
+		
+		|denyAccess
+		info: "Denial-of-service attacks makes blobls unavailable."
+	}
+	
+	// Azure specific asset
+	asset File extends EncryptedData
+	info: "Blob storage is optimized for storing massive amounts of unstructured data, such as text or binary data and stored in an Azure storage account"
+	{
+		|contributorAccess
+		->	read,
+			write,
+			delete
+			
+		|readerAccess
+		->	read
+		
+		|denyAccess
+		info: "Denial-of-service attacks makes files unavailable."
+	}
+	
+	// Azure specific asset
+	asset Disk extends EncryptedData
+	info: "Virtual machines in Azure use disks as a place to store the operating system files, applications, and data."
+	{
+		|contributorAccess
+		->	downloadDisk
+		
+		| downloadDisk
+		->	reAttachDiskandAccessData
+		
+		|reAttachDiskandAccessData
+		info: "A privileged user can attach a disk to a machine to access stored data."
+		->	read,
+			write,
+			delete
+		
+		# diskEncryption
+		info: "When disk are encrypted, data is only accessabile through authenticated machine access"
+		->	reAttachDiskandAccessData
+	}
+	
+	// Azure specific asset
+	asset OSDisk extends Disk
+	info: "Every virtual machine has one attached operating system disk. It's registered as a SATA drive and labeled as the C: drive by default. This disk has a maximum capacity of 2048 gigabytes (GB). Windows VMs Documentation, last update 11/15/2017: https://docs.microsoft.com/en-us/azure/virtual-machines/windows/about-disks-and-vhds"
+	{
+		|access
+		info: "access the data on the disk through the authenticated access to the VM attached to the disk"
+		->	read,
+			write,
+			delete,
+			machines.denialOfService
+	}
+	
+	// Azure specific asset
+	asset DataDisk extends Disk
+	info: "A data disk is a VHD that's attached to a virtual machine to store application data, or other data you need to keep. Windows VMs Documentation, last update 11/15/2017: https://docs.microsoft.com/en-us/azure/virtual-machines/windows/about-disks-and-vhds"
+	{
+		|access
+		info: "access the data on the disk through the authenticated access to the VM attached to the disk"
+		->	read,
+			write,
+			delete
+		
+		| detach
+		info: "detach data disk from the machine"
+		->	denyAccess,
+			reAttachDiskandAccessData
+	}
+
+	asset Dataflow
+	info: "Dataflow is a channel that contains Data in transit."
+	rationale: "As opposed to securiLang1, missing network paths cannot stop modelled dataflows. If there is a dataflow but no network infrastructure to support it, this logic will assume that the unmodelled infrastructure exists."
+	{
+		| denialOfService
+			info: "A denial-of-service-attack on the dataflow makes the contained data inaccessible. The information may, however also be available elsewhere."
+			->	data.delete
+
+		| request
+			->	services.connect
+
+		| respond
+			->	clients.connect,
+				executingClients.access
+	}
+}
+
+category Security {
+
+	asset Account {
+	
+		| authenticate
+			info: "After authentication on an account, compromise its privileges."
+			->	compromise
+
+		|compromise
+			->	accessedMachines.authenticate, 
+				assignedSoftwares.authenticate,
+				readData.anyAccountRead,
+				writtenData.anyAccountWrite,
+				deletedData.anyAccountDelete,
+				authenticatees.compromise
+	}
+	
+	// Azure specific asset
+	abstractAsset ActiveDirectoryAccount
+	info:""
+	{
+		|authenticate
+		->	compromise
+		
+		|compromise
+		->	owners.RBA,
+			contributors.RBA,
+			readers.RBA
+	}
+	
+	// Azure specific asset
+	asset OrganizationalAccount extends ActiveDirectoryAccount
+	info: "An azure active directory account which represents a user identity"
+	rationale: "Unlike local VM account, an organizational account is used to access azure services such as Azure Storage."
+	{
+		|authenticate
+		->	compromise,
+			vmUserLogin.RBA
+	}
+	
+	// Azure specific asset
+	asset ApplicationAccount extends ActiveDirectoryAccount
+	info: "An azure active directory account which represents code that needs to access or modify resources" 
+	{
+	}
+
+	asset Credentials extends Data {
+		
+	    |read
+	    -> 	accounts.authenticate,
+			activeDirectoryAccounts.authenticate,
+			virtualMachine.authenticate
+		
+		| attemptBruteForceAttack
+			->	bruteForceAttack
+			
+		| attemptDictionaryAttack
+	    	->	dictionaryAttack
+			
+		& bruteForceAttack [UniformDistribution(0.0, 100.0)]
+	    	info: "A raw brute-force attack is always possible, but feasible only sometimes. The distribution parameter (time for search space exhaustion) depends on the encryption scheme, the attacked entropy (e.g. key entropy), and the attacker equipment. It is therefore determined in crypto-suite-specializations of EncryptedData, e.g. MD5EncryptedData."
+	    	rationale: "Raw brute-forcing is a linear process that has an equal chance of stumbling over the answer at any point between the start of the search and the complete exhaustion ofthe search space."
+			// APT's might be expected to have a factor 10-100 times better performance than anything publically known? (http://www.dagbladet.no/nyheter/nis-aquires-supercomputer/61602521)
+	    	-> 	accounts.authenticate
+
+		& dictionaryAttack [GammaDistribution(0.3, 0.25)]
+			info: "If the information is predictable (e.g. default passwords), it is easier to crack when encrypted. For offline cracking, we define a predictable password as one that can be found (with a frequency higher than 1) in a dictionary such as RockYou. Even with 4096 iterations bcrypt, such passwords are cracked in an hour. (A slow bcrypt cracker does 100 hashes/second. With 90-95% probability, it will be enough to try the 360 000 most popular passwords in RockYou to find one randomly drawn from RockYou's accounts.) "
+			rationale: "The nominal Gamma distribution scale factor for RockYou is 2,000,000 (GammaDistribution(0.3, 2000000)). It should be divided by the number of hashes that can be brute-forced per day. For MD5, this would be 200 GH/s*3600*24. Even with 4096 iterations bcrypt, predictable passwords are cracked in an hour. (A slow bcrypt cracker does 100 hashes/second. With 90-95% probability, it will be enough to try the 360 000 most popular passwords in RockYou to find one randomly drawn from RockYou's accounts.) However, for online cracking, the number of hashes per day might be 3600*24, leading to GammaDistribution[0.3, 23], which would mean about a month for 95% cracking probability (Probability[t < 30, t belongs to GammaDistribution[0.3, 23]] = 0.945)."
+			// APT's might be expected to have a factor 10-100 times better performance than anything publically known? (http://www.dagbladet.no/nyheter/nis-aquires-supercomputer/61602521)
+			->	accounts.authenticate		
+	}
+	
+	// Azure specific asset
+	asset SharedAccessSignature extends Credentials
+	info: "A shared access signature (SAS) provides its holder with a way to acquire constrained access to one or more storage services without the need for account keys"
+	{
+	}
+	
+	// Azure specific asset
+	asset SASBlobsReadonly extends SharedAccessSignature
+	info: "A shared access signature of type SASBlobsReadonly provides read-access over all the blobs in the specified storage account."
+	{
+		|read
+		->	storageAccount.blobsReadAccess
+	}
+	
+	// Azure specific asset
+	asset SASBlobsFullAccess extends SharedAccessSignature
+	info: "A shared access signature of type SASBlobsFullAccess provides read, write, and delete permissions over all blobs in the specified storage account"
+	{
+		|read
+		->	storageAccount.blobsContributorAccess
+	}
+	
+	// Azure specific asset
+	asset SASFilesReadonly extends SharedAccessSignature
+	info: "A shared access signature of type SASFilesReadonly provides read access over all Files in the specified storage account."
+	{
+		|read
+		->	storageAccount.filesReadAccess
+	}
+	
+	// Azure specific asset
+	asset SASFilesFullAccess extends SharedAccessSignature
+	info: "A shared access signature of type SASFilesFullAccess provides read, write, and delete permissions over all files in the specified storage account"
+	{
+		|read
+		->	storageAccount.filesContributorAccess
+	}
+	
+	// Azure specific asset
+	asset StorageKeys extends Credentials
+	info: "The storage account key is similar to the root password for the storage account. Storage account keys are 512-bit strings created by Azure that, along with the storage account name, can be used to access the data objects stored in the storage account"
+	{
+		|read
+		->	storageAccount.contributorAccess
+	}
+
+	asset Vulnerability {
+	| exploit [ExponentialDistribution(10.0)]
+      -> privileges.compromise
+   }
+
+   asset CryptographicKey extends Data {
+		|read
+		->	decryptedData.readEncrypted,
+			encryptedData.writeEncrypted
+
+	}
+	
+	// Azure specific asset
+	asset ReaderRole
+	info:"In Azure, reader is one of the roles which can be assigned to an organizational account, or an application account. ReaderRole asset, however, represents a relationship that assigns read privileges to an account over a resource or a scope of resources."
+	{
+		|RBA
+		->	_readerRBA
+			
+		|_readerRBA
+		->	storageAccounts.readerAccess,
+			resourceGroups.readerAccess,
+			subscriptions.readerAccess,
+			virtualMachines.readerAccess,
+			publicIPs.readerAccess,
+			virtualNICs.readerAccess
+	}
+	
+	// Azure specific asset
+	asset ContributorRole extends ReaderRole
+	info:"In Azure, contributor is one of the roles which can be assigned to an organizational account, or an application account. ContributorRole asset, however, represents a relationship that assigns contributor privileges to an account over a resource or a scope of resources."
+	{
+		|RBA
+		->	_contributorRBA
+			
+		|_contributorRBA
+		->	networks.contributorAccess,
+			storageAccounts.contributorAccess,
+			resourceGroups.contributorAccess,
+			subscriptions.contributorAccess,
+			virtualMachines.contributorAccess,
+			publicIPs.contributorAccess,
+			virtualNICs.contributorAccess
+	}
+	
+	// Azure specific asset
+	asset OwnerRole extends ContributorRole
+	info: "In Azure, owner is one of the roles which can be assigned to an organizational account, or an application account. OwnerRole asset, however, represents a relationship that assigns owner privileges to an account over a resource or a scope of resources"
+	{
+	}
+	
+	// Azure specific asset
+	asset VMUserLoginRole
+	info: "Organizational accounts with this role have the ability to login to a virtual machine as a non-admin user."
+	{
+		|RBA
+		->	virtualMachines._connectVM
+	}
+	
+	// Azure specific asset
+	asset Subscription
+	info: "An azure subscription defines a scope in which Azure users can have privileges over"
+	{
+		|readerAccess
+		->	resourceGroups.readerAccess
+		
+		|contributorAccess
+		->	resourceGroups.contributorAccess		
+	}
+	
+	// Azure specific asset
+	asset ResourceGroup
+	info: "Azure resource groups provide a way to monitor, control access, provision and manage billing for collections of assets that are required to run an application, or used by a client or company department"
+	{
+		|contributorAccess
+		->	storageAccounts.contributorAccess,
+			networks.contributorAccess
+		
+		|readerAccess
+		->	storageAccounts.readerAccess
+	}
+	
+	// Azure specific asset
+	asset BlobsContainer
+	info: "A container organizes a set of blobs, similar to a folder in a file system. Blobs always reside within a container"
+	rationale: "Blob storage is optimized for storing massive amounts of unstructured data, such as text or binary data."
+	{		
+		|readerAccess
+		->	blockBlobs.readerAccess
+			
+		
+		|contributorAccess
+		->	blockBlobs.contributorAccess,
+			disks.contributorAccess,
+			denyAccess
+		
+		|denyAccess
+		info: "Denial-of-service attacks can make blobs unavailable."
+		-> blockBlobs.denyAccess
+	}
+	
+	// Azure specific asset
+	asset FileShare
+	info: "A container organizes a set of blobs, similar to a folder in a file system. All blobs reside within a container"
+	{
+		|readerAccess
+		->	files.readerAccess
+		
+		|contributorAccess
+		->	files.contributorAccess,
+			denyAccess
+		
+		|denyAccess
+		info: "Denial-of-service attacks can make files unavailable."
+		-> files.denyAccess
+	}
+
+}
+
+category People {
+	asset User {
+	
+		| phishingAttempt
+			info: "An attacker attempts to steal sensitive information such as credentials."
+			->	phishUnawareUser,
+				phishAwareUser
+			
+		| phishAwareUser
+			->	phish
+
+		& phishUnawareUser
+			->	phish
+
+		| phish [ExponentialDistribution(10.0)]
+			info: "A successful phishing attempt leads to authenticated access of the corresponding account."
+			->	accounts.authenticate,
+				activeDirectoryAccounts.compromise
+
+		# securityAware
+			info: Attempts to deal with the growing number of reported phishing incidents include legislation, user training, public awareness, and technical security measures."
+			->	phishUnawareUser
+	}
+}
+
+associations {
+	Account 			[accounts]			  			*	<-- AccessPrivileges		--> *		[accessedMachines]		Machine
+			info: "These accounts grant access the the machine."
+	Account 			[authenticators]				*	<-- Authentication			--> *		[authenticatees]	 	Account
+	Account 			[accounts]						*  	<-- Credentials				--> *		[credentials] 			Credentials
+	Account 			[readingAccounts]				*  	<-- Read					--> *		[readData] 				Data
+	Account 			[writingAccounts]				*  	<-- Write					--> *		[writtenData] 			Data
+	Account 			[deletingAccounts]				*  	<-- Delete					--> *		[deletedData] 			Data
+	Data				[data] 							*	<-- Representation 			--> 0-1		[information] 			Information
+			info: "The data constitutes a syntactic representation at rest of the information."
+	Data				[data] 							*	<-- Storage 				--> *		[machines]				Machine
+	Data				[containingData] 				*	<-- Containment 			--> *		[containedData] 		Data
+	User 				[users]							*  	<-- UserAccount 			--> *		[accounts]				Account
+	User 				[users]							*  	<-- UserAccount 		--> *		[activeDirectoryAccounts]	ActiveDirectoryAccount
+
+	Machine				[machines]						*	<-- Installation			--> 0-1		[product]				Product
+	Machine 			[machine] 			  			1-*	<-- Exposure   				--> * 	    [vulnerability]   		Vulnerability
+	Product				[connectionVulnerableProduct]	*	<-- ConnectionVulnerability	--> 0-1		[connectionVulnerabilities]		Vulnerability
+	Product				[accessVulnerableProduct]		*	<-- AccessVulnerability		--> 0-1		[accessVulnerabilities]			Vulnerability
+	Account     		[privileges]            		1-* <-- Privileges             	--> *		[vulnerabilities]		Vulnerability
+
+	Machine				[executor]						0-1	<-- Execution				--> *		[executees]				Software
+	Account 			[assignedAccounts]				1-*	<-- Assignment				--> *		[assignedSoftwares] 	Software
+			info: "Software needs to be granted certain privileges when executing on a platform. When the software is compromised, the attacker gains its privileges on the platform."
+			
+	EncryptedData		[decryptedData]					*	<-- Decryption				-->	*		[decryptionKeys]		CryptographicKey
+	EncryptedData		[encryptedData]					*	<-- Encryption				-->	*		[encryptionKeys]		CryptographicKey
+
+	Account    			[authenticatedAccounts] 		*   <-- AccountAuthentication  	--> 0-1 	[authenticationServices]	AuthenticationService
+      	info: "Conceptually, authentication is separated from access control (obvious in the case of e.g. Radius servers). authenticationServices provide the authentication service."
+
+	Network 			[trafficNetworks]				* 	<-- Connection 				--> * 		[trafficRouters]		Router
+	Network 			[networks]						* 	<-- Communication 			--> *		[dataflows] 			Dataflow
+	Dataflow			[dataflows]						* 	<-- Request					--> *		[clients]				NetworkClient
+	Dataflow			[dataflows]						* 	<-- Response				--> *		[services]				NetworkService
+	Dataflow	[programDistributionFlow]		* 	<-- ProgramDistributionToClient		--> *		[executingClients] 		NetworkClient
+		info: "Some servers distribute programs to clients, e.g. software updates, or Web applications."
+	Dataflow	[programDistributionFlow]		* 	<-- ProgramDistributionFromServer	--> *		[providingServices]		NetworkService
+		info: "Some servers distribute programs to clients, e.g. software updates, or Web applications."
+	Dataflow			[dataflow]						0-1	<-- Transmission			--> 0-1		[data]					Data
+	
+	// Azure associations
+		info: "An organizationl account can be granted RBA over a subscription, a resource group, or a storage account"
+		
+	ActiveDirectoryAccount	[activeDirectoryAccounts]		*	<-- OwnerRoleAssignment			-->	*	[owners]			OwnerRole
+	ActiveDirectoryAccount	[activeDirectoryAccounts]		*	<-- ContributorRoleAssignment	-->	*	[contributors]		ContributorRole
+	ActiveDirectoryAccount	[activeDirectoryAccounts]		*	<-- ReaderRoleAssignment		-->	*	[readers]			ReaderRole
+	
+	OrganizationalAccount	[organizationlAccounts]			*	<-- ReaderRoleAssignment		-->	*	[vmUserLogin]		VMUserLoginRole
+	
+		info: "An organizationl account has a user name and password"
+	ActiveDirectoryAccount	[activeDirectoryAccounts]		*  	<-- Credentials					--> *	[credentials] 		Credentials
+	
+	ReaderRole			[readers]						*	<--	ReaderRoleAccess		-->	*		[subscriptions]			Subscription
+	ReaderRole			[readers]						*	<--	ReaderRoleAccess		-->	*		[resourceGroups]		ResourceGroup
+	ReaderRole			[readers]						*	<--	ReaderRoleAccess		-->	*		[storageAccounts]		StorageAccount
+	ReaderRole			[readers]						*	<-- ReaderRoleAccess		-->	*		[blobsContainers]		BlobsContainer
+	ReaderRole			[readers]						*	<--	ReaderRoleAccess		-->	*		[networks]				Network
+	ReaderRole			[readers]						*	<--	ReaderRoleAccess		-->	*		[virtualMachines]		VirtualMachine
+	ReaderRole			[readers]						*	<--	ReaderRoleAccess		-->	*		[publicIPs]				PublicIP
+	ReaderRole			[readers]						*	<--	ReaderRoleAccess		-->	*		[virtualNICs]			VirtualNIC
+	
+	VMUserLoginRole		[vmUserLogin]					*	<--	LoginPrivilege			-->	*		[virtualMachines]		VirtualMachine
+	
+		info: "A subscription may contain one or more resource groups"
+	Subscription		[subscription]					0-1	<-- Containment				-->	*		[resourceGroups]		ResourceGroup
+	
+		info: "A resource group may contain one or more storage accounts, and/or virtual network(s)"
+	ResourceGroup		[resourceGroup]					0-1	<-- Containment				-->	*		[storageAccounts]		StorageAccount
+	ResourceGroup		[resourceGroup]					0-1	<-- Containment				-->	*		[networks]				Network
+	ResourceGroup		[resourceGroup]					0-1	<-- Containment				-->	*		[virtualMachines]		VirtualMachine
+	ResourceGroup		[resourceGroup]					0-1	<-- Containment				-->	*		[PublicIPs]				PublicIP
+	ResourceGroup		[resourceGroup]					0-1	<-- Containment				-->	*		[virtualNICs]			VirtualNIC
+	
+		info: "A storage account may contain one or more blob containers"
+	StorageAccount		[storageAccount]				0-1	<-- Containment				-->	*		[blobsContainers]		BlobsContainer
+	
+		info: "A blob container may contain one or more block blobs"
+	BlobsContainer		[blobsContainer]				0-1	<-- Containment				-->	*		[blockBlobs]			BlockBlob
+		info: "A blob container may contain one or more page blobs (disk)"
+	BlobsContainer		[blobsContainer]				0-1	<-- Containment				-->	*		[disks]					Disk
+	
+		info: "A storage account may contain one or more file shares"
+	StorageAccount		[storageAccount]				0-1	<-- Containment				-->	*		[fileShares]			FileShare
+	
+		info: "A file share may contain one or more files"
+	FileShare			[fileShare]						0-1	<-- Containment				-->	*		[files]					File
+	
+		info: "A storage account may contain one or more disks"
+	StorageAccount		[storageAccount]				0-1	<-- Containment				-->	*		[disks]					Disk
+
+		info: "Each machine has one OS disk"
+	OSDisk				[osDisk]						*	<--	Attachment				-->	*		[machines]				Machine
+	
+		info: "One or more data disks can be attached to a machine"
+	DataDisk				[dataDisks]					*	<--	Attachment				-->	*		[machines]				Machine
+	
+		info: "Blobs in a storage account can be directly accessed via signature access control"
+	StorageAccount		[storageAccount]				0-1	<-- SASBasedAccess			-->	*		[sasBlobFullaccess]		SASBlobsFullAccess
+	StorageAccount		[storageAccount]				0-1	<-- SASBasedAccess			-->	*		[sasBlobReadonly]		SASBlobsReadonly
+
+		info: "Files in a storage account can be directly accessed via signature access control"
+	StorageAccount		[storageAccount]				0-1	<-- SASBasedAccess			-->	*		[sasFileFullaccess]		SASFilesFullAccess
+	StorageAccount		[storageAccount]				0-1	<-- SASBasedAccess			-->	*		[sasFileReadonly]		SASFilesReadonly
+	
+		info: "Each storage account has otwo access keys, primary and secondary access key"
+	StorageAccount		[storageAccount]				0-1	<-- StorageKeysAccess		-->	*		[storageKeys]			StorageKeys
+		
+		info: "Accessing network leads to be connected with other machines on the same network, but not necessarily gain access those machines"
+	Network				[trafficNetworks]				*	<--	Communication			-->	*		[machines]				Machine
+		info: ""
+	PublicIP			[publicIP]						1	<--	Association				-->	1		[virtualMachine]		VirtualMachine
+		info: ""
+	PublicIP			[publicIP]						1	<--	Association				-->	1		[virtualNIC]			VirtualNIC
+		info: ""
+	PublicIP			[publicIP]						1	<--	Association				-->	1		[virtualNetwork]		Network
+	
+		info: ""
+	Credentials			[credentials]					1	<--	AccessKeys				-->	1		[virtualMachine]		VirtualMachine
+	
+		info: ""
+	VirtualNIC			[virtualNIC]					1	<--	Attachment				-->	1		[virtualMachine]		VirtualMachine
+}
